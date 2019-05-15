@@ -27,6 +27,7 @@
 #include "BitMatrix.h"
 
 #include <array>
+#include "aztec/CornerDetector.h"
 
 namespace ZXing {
 namespace Aztec {
@@ -271,9 +272,7 @@ static int GetColor(const BitMatrix& image, const PixelPoint& p1, const PixelPoi
 * @return true if the border of the rectangle passed in parameter is compound of white points only
 *         or black points only
 */
-static bool IsWhiteOrBlackRectangle(const BitMatrix& image, const PixelPoint& pt1, const PixelPoint& pt2, const PixelPoint& pt3, const PixelPoint& pt4) {
-
-	int corr = 3;
+static bool IsWhiteOrBlackRectangle(const BitMatrix& image, const PixelPoint& pt1, const PixelPoint& pt2, const PixelPoint& pt3, const PixelPoint& pt4, int corr) {
 
 	PixelPoint p1{ pt1.x - corr, pt1.y + corr };
 	PixelPoint p2{ pt2.x - corr, pt2.y - corr };
@@ -371,6 +370,8 @@ static void ExpandSquare(std::array<ResultPoint, 4>& cornerPoints, float oldSide
 */
 static bool GetBullsEyeCorners(const BitMatrix& image, const PixelPoint& pCenter, std::array<ResultPoint, 4>& result, bool& compact, int& nbCenterLayers)
 {
+	float corr_factor = 1.0f;
+
 	PixelPoint pina = pCenter;
 	PixelPoint pinb = pCenter;
 	PixelPoint pinc = pCenter;
@@ -378,6 +379,8 @@ static bool GetBullsEyeCorners(const BitMatrix& image, const PixelPoint& pCenter
 
 	bool color = true;
 	for (nbCenterLayers = 1; nbCenterLayers < 9; nbCenterLayers++) {
+		float corr_tmp;
+
 		PixelPoint pouta = GetFirstDifferent(image, pina, color, 1, -1);
 		PixelPoint poutb = GetFirstDifferent(image, pinb, color, 1, 1);
 		PixelPoint poutc = GetFirstDifferent(image, pinc, color, -1, 1);
@@ -388,10 +391,15 @@ static bool GetBullsEyeCorners(const BitMatrix& image, const PixelPoint& pCenter
 		//c      b
 
 		if (nbCenterLayers > 2) {
+			corr_tmp = std::max(Distance(poutd, pouta) / ((float)(((nbCenterLayers * 2) - 1) * 2)), 1.0f);
+
 			float q = Distance(poutd, pouta) * nbCenterLayers / (Distance(pind, pina) * (nbCenterLayers + 2));
-			if (q < 0.75 || q > 1.25 || !IsWhiteOrBlackRectangle(image, pouta, poutb, poutc, poutd)) {
+			if (q < 0.75 || q > 1.25 || !IsWhiteOrBlackRectangle(image, pouta, poutb, poutc, poutd, (int)corr_tmp)) {
 				break;
 			}
+		}
+		else {
+			corr_tmp = corr_factor;
 		}
 
 		pina = pouta;
@@ -400,6 +408,7 @@ static bool GetBullsEyeCorners(const BitMatrix& image, const PixelPoint& pCenter
 		pind = poutd;
 
 		color = !color;
+		corr_factor = corr_tmp;
 	}
 
 	if (nbCenterLayers != 5 && nbCenterLayers != 7) {
@@ -482,9 +491,23 @@ static int GetDimension(bool compact, int nbLayers)
 * @param bullsEyeCorners the array of bull's eye corners
 * @return the array of aztec code corners
 */
-static void GetMatrixCornerPoints(std::array<ResultPoint, 4>& bullsEyeCorners, bool compact, int nbLayers, int nbCenterLayers)
+static bool GetMatrixCornerPoints(PixelPoint pCenter, const BitMatrix& image, std::array<ResultPoint, 4>& bullsEyeCorners, int targetMatrixSize)
 {
-	ExpandSquare(bullsEyeCorners, static_cast<float>(2 * nbCenterLayers), static_cast<float>(GetDimension(compact, nbLayers)));
+	float maxX = 0.0f;
+	float minX = image.width();
+	for (ResultPoint bullsEyeCorner : bullsEyeCorners) {
+		float tmpX = bullsEyeCorner.x();
+		if (tmpX > maxX) {
+			maxX = tmpX;
+		}
+		if (tmpX < minX) {
+			minX = tmpX;
+		}
+	}
+
+	int initSize = (int)(maxX - minX);  // we are looking for first white rectangle outside of bulls eye
+	CornerDetector detector(image, initSize, pCenter.x, pCenter.y, targetMatrixSize);
+	return detector.Detect(bullsEyeCorners);
 }
 
 /**
@@ -496,8 +519,8 @@ static BitMatrix SampleGrid(const BitMatrix& image, const ResultPoint& topLeft, 
 {
 	int dimension = GetDimension(compact, nbLayers);
 
-	float low = dimension / 2.0f - nbCenterLayers;
-	float high = dimension / 2.0f + nbCenterLayers;
+	float low = .5f;
+	float high = (float)dimension - .5f;
 
 	return GridSampler::Instance()->sampleGrid(image,
 		dimension,
@@ -540,12 +563,20 @@ DetectorResult Detector::Detect(const BitMatrix& image, bool isMirror)
 	}
 
 	// 4. Sample the grid
-	auto bits = SampleGrid(image, bullsEyeCorners[shift % 4], bullsEyeCorners[(shift + 1) % 4], bullsEyeCorners[(shift + 2) % 4], bullsEyeCorners[(shift + 3) % 4], compact, nbLayers, nbCenterLayers);
+	if (!GetMatrixCornerPoints(pCenter, image, bullsEyeCorners, GetDimension(compact, nbLayers))) {
+		return {};
+	}
+
+	auto bits = SampleGrid(image, 
+		bullsEyeCorners[(shift + 1) % 4], 
+		bullsEyeCorners[(shift + 2) % 4], 
+		bullsEyeCorners[(shift + 3) % 4], 
+		bullsEyeCorners[(shift + 0) % 4], compact, nbLayers, nbCenterLayers);
 	if (bits.empty())
 		return {};
 
 	// 5. Get the corners of the matrix.
-	GetMatrixCornerPoints(bullsEyeCorners, compact, nbLayers, nbCenterLayers);
+	//GetMatrixCornerPoints(bullsEyeCorners, compact, nbLayers, nbCenterLayers);
 
 	return {std::move(bits), {bullsEyeCorners.begin(), bullsEyeCorners.end()}, compact, nbDataBlocks, nbLayers};
 }

@@ -148,6 +148,8 @@ if (ENABLE_DECODERS)
         src/aztec/AZDetectorResult.h
         src/aztec/AZReader.h
         src/aztec/AZReader.cpp
+        src/aztec/CornerDetector.h
+        src/aztec/CornerDetector.cpp
     )
 endif()
 if (ENABLE_ENCODERS)
